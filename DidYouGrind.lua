@@ -22,6 +22,7 @@ local defaults = {
     compactMode = false,
     locked = false,
     weeklyBossDebug = false,
+    weeklyBossQuestIDs = {},
     showSections = {
         keys = true,
         dawncrests = true,
@@ -426,7 +427,16 @@ end
 
 -- Add quest IDs here for the most accurate weekly world boss check.
 -- Example: local WEEKLY_BOSS_QUEST_IDS = { 12345, 67890 }
-local WEEKLY_BOSS_QUEST_IDS = {}
+local WEEKLY_BOSS_QUEST_IDS = {
+    92034, -- Thorm'belan
+}
+
+local WEEKLY_BOSS_NAME_MATCHES = {
+    "thorm'belan",
+    "lu'ashal",
+    "predaxas",
+    "cragpine",
+}
 
 local function IsQuestCompleted(questID)
     if C_QuestLog and C_QuestLog.IsQuestFlaggedCompleted then
@@ -440,10 +450,77 @@ local function IsQuestCompleted(questID)
     return false
 end
 
-local function GetWeeklyBossStatus()
-    local hasQuestIDs = #WEEKLY_BOSS_QUEST_IDS > 0
+local function GetAllWeeklyBossQuestIDs()
+    local merged = {}
+    local seen = {}
 
-    for _, questID in ipairs(WEEKLY_BOSS_QUEST_IDS) do
+    local function AddID(id)
+        if type(id) ~= "number" then
+            return
+        end
+        if seen[id] then
+            return
+        end
+        seen[id] = true
+        table.insert(merged, id)
+    end
+
+    for _, id in ipairs(WEEKLY_BOSS_QUEST_IDS) do
+        AddID(id)
+    end
+
+    if DidYouGrindDB and type(DidYouGrindDB.weeklyBossQuestIDs) == "table" then
+        for _, id in ipairs(DidYouGrindDB.weeklyBossQuestIDs) do
+            AddID(id)
+        end
+    end
+
+    return merged
+end
+
+local function IsKnownWeeklyBossTitle(title)
+    if type(title) ~= "string" or title == "" then
+        return false
+    end
+
+    local normalized = string.lower(title):gsub("’", "'")
+    for _, namePart in ipairs(WEEKLY_BOSS_NAME_MATCHES) do
+        if string.find(normalized, namePart, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function LearnWeeklyBossQuestID(questID, title)
+    if not DidYouGrindDB or type(questID) ~= "number" then
+        return false
+    end
+
+    if type(DidYouGrindDB.weeklyBossQuestIDs) ~= "table" then
+        DidYouGrindDB.weeklyBossQuestIDs = {}
+    end
+
+    local knownIDs = GetAllWeeklyBossQuestIDs()
+    for _, id in ipairs(knownIDs) do
+        if id == questID then
+            return false
+        end
+    end
+
+    table.insert(DidYouGrindDB.weeklyBossQuestIDs, questID)
+
+    local label = (title and title ~= "") and (" (" .. title .. ")") or ""
+    print("DidYouGrind: learned weekly boss questID=" .. tostring(questID) .. label)
+    return true
+end
+
+local function GetWeeklyBossStatus()
+    local knownQuestIDs = GetAllWeeklyBossQuestIDs()
+    local hasQuestIDs = #knownQuestIDs > 0
+
+    for _, questID in ipairs(knownQuestIDs) do
         if IsQuestCompleted(questID) then
             return true, "Weekly quest complete", true, true
         end
@@ -1050,6 +1127,14 @@ SlashCmdList["DIDYOUGRIND"] = function(msg)
         else
             print("DidYouGrind: weekly boss debug disabled.")
         end
+    elseif msg == "wbids" then
+        local ids = GetAllWeeklyBossQuestIDs()
+        if #ids == 0 then
+            print("DidYouGrind: no weekly boss quest IDs known yet.")
+        else
+            table.sort(ids)
+            print("DidYouGrind: known weekly boss quest IDs: " .. table.concat(ids, ", "))
+        end
     elseif msg == "config" or msg == "options" then
         if configPanel:IsShown() then
             configPanel:Hide()
@@ -1065,6 +1150,7 @@ SlashCmdList["DIDYOUGRIND"] = function(msg)
         print("/dyg toggle")
         print("/dyg refresh")
         print("/dyg wbdebug")
+        print("/dyg wbids")
         print("/dyg config")
     end
 end
@@ -1088,11 +1174,16 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         end
     elseif event == "QUEST_TURNED_IN" then
         local questID = ...
+        local title = nil
+        if C_QuestLog and C_QuestLog.GetTitleForQuestID then
+            title = C_QuestLog.GetTitleForQuestID(questID)
+        end
+
+        if IsKnownWeeklyBossTitle(title) then
+            LearnWeeklyBossQuestID(questID, title)
+        end
+
         if DidYouGrindDB and DidYouGrindDB.weeklyBossDebug then
-            local title = nil
-            if C_QuestLog and C_QuestLog.GetTitleForQuestID then
-                title = C_QuestLog.GetTitleForQuestID(questID)
-            end
             if title and title ~= "" then
                 print("DidYouGrind WB Debug: QUEST_TURNED_IN questID=" .. tostring(questID) .. " title=\"" .. title .. "\"")
             else
