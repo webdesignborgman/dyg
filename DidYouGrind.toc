@@ -1,0 +1,8 @@
+## Interface: 120001, 120000
+## Title: DidYouGrind
+## Notes: Lightweight tracker for your weekly sins
+## Author: Alex
+## Version: 0.1.0
+## SavedVariables: DidYouGrindDB
+
+DidYouGrind.lua
