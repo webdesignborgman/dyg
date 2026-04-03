@@ -9,20 +9,22 @@ local eventFrame = CreateFrame("Frame")
 -- DATABASE DEFAULTS
 -- =========================================
 
-local defaults = {
+local layoutDefaults = {
     point = "CENTER",
     relativePoint = "CENTER",
     x = 0,
     y = 0,
     width = 420,
     height = 320,
+}
+
+local characterDefaults = {
     minimized = false,
     startMinimized = false,
     autoRefresh = true,
     compactMode = false,
     locked = false,
     weeklyBossDebug = false,
-    weeklyBossQuestIDs = {},
     showSections = {
         keys = true,
         dawncrests = true,
@@ -41,6 +43,30 @@ local defaults = {
         dungeons = true,
         world = false,
     },
+    layout = {
+        point = "CENTER",
+        relativePoint = "CENTER",
+        x = 0,
+        y = 0,
+        width = 420,
+        height = 320,
+    },
+}
+
+local defaults = {
+    accountWideLayout = true,
+    globalLayout = {
+        point = "CENTER",
+        relativePoint = "CENTER",
+        x = 0,
+        y = 0,
+        width = 420,
+        height = 320,
+    },
+    weeklyBossQuestIDs = {},
+    hiddenAltKeys = {},
+    characterProfiles = {},
+    characterSnapshots = {},
 }
 
 local function CopyDefaults(src, dst)
@@ -57,6 +83,103 @@ local function CopyDefaults(src, dst)
     end
 
     return dst
+end
+
+local activeCharacterProfile = nil
+local activeLayoutProfile = nil
+local currentCharacterKey = nil
+local SyncConfigPanelChecks = nil
+local UpdateData = nil
+local LayoutUI = nil
+
+local function GetCharacterDisplayNameFromKey(key)
+    if type(key) ~= "string" then
+        return "Unknown"
+    end
+    local realm, name = string.match(key, "^(.+)%-(.+)$")
+    if realm and name then
+        return name .. " (" .. realm .. ")"
+    end
+    return key
+end
+
+local function GetCharacterKey()
+    local name, realm = UnitFullName("player")
+    name = name or UnitName("player") or "Unknown"
+    realm = realm or GetRealmName() or "UnknownRealm"
+    realm = realm:gsub("%s+", "")
+    return realm .. "-" .. name
+end
+
+local function MigrateLegacyIntoCharacterProfile(profile, root)
+    local hasLegacy = root.point ~= nil or root.minimized ~= nil or root.showSections ~= nil
+    if not hasLegacy then
+        return
+    end
+
+    profile.minimized = root.minimized
+    profile.startMinimized = root.startMinimized
+    profile.autoRefresh = root.autoRefresh
+    profile.compactMode = root.compactMode
+    profile.locked = root.locked
+    profile.weeklyBossDebug = root.weeklyBossDebug
+    profile.showSections = CopyDefaults(root.showSections or {}, profile.showSections or {})
+    profile.collapsed = CopyDefaults(root.collapsed or {}, profile.collapsed or {})
+    profile.layout = CopyDefaults({
+        point = root.point,
+        relativePoint = root.relativePoint,
+        x = root.x,
+        y = root.y,
+        width = root.width,
+        height = root.height,
+    }, profile.layout or {})
+end
+
+local function RefreshActiveProfiles()
+    if not DidYouGrindDB then
+        return
+    end
+
+    DidYouGrindDB = CopyDefaults(defaults, DidYouGrindDB)
+    DidYouGrindDB.globalLayout = CopyDefaults(layoutDefaults, DidYouGrindDB.globalLayout)
+
+    local charKey = GetCharacterKey()
+    currentCharacterKey = charKey
+    DidYouGrindDB.characterProfiles[charKey] = CopyDefaults(characterDefaults, DidYouGrindDB.characterProfiles[charKey] or {})
+    local charProfile = DidYouGrindDB.characterProfiles[charKey]
+    charProfile.layout = CopyDefaults(layoutDefaults, charProfile.layout)
+
+    activeCharacterProfile = charProfile
+    if DidYouGrindDB.accountWideLayout then
+        activeLayoutProfile = DidYouGrindDB.globalLayout
+    else
+        activeLayoutProfile = charProfile.layout
+    end
+
+end
+
+local function GetCharacterProfile()
+    return activeCharacterProfile or characterDefaults
+end
+
+local function GetLayoutProfile()
+    return activeLayoutProfile or layoutDefaults
+end
+
+local function GetShowSections()
+    local profile = GetCharacterProfile()
+    profile.showSections = CopyDefaults(characterDefaults.showSections, profile.showSections or {})
+    return profile.showSections
+end
+
+local function GetCollapsedSections()
+    local profile = GetCharacterProfile()
+    profile.collapsed = CopyDefaults(characterDefaults.collapsed, profile.collapsed or {})
+    return profile.collapsed
+end
+
+local function IsProfileReady()
+    return activeCharacterProfile ~= nil and activeLayoutProfile ~= nil
 end
 
 -- =========================================
@@ -89,7 +212,7 @@ mainFrame:SetBackdrop({
 mainFrame:SetBackdropColor(0, 0, 0, 0.92)
 
 mainFrame:SetScript("OnDragStart", function(self)
-    if DidYouGrindDB and DidYouGrindDB.locked then
+    if GetCharacterProfile().locked then
         return
     end
     self:StartMoving()
@@ -99,10 +222,11 @@ mainFrame:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
 
     local point, _, relativePoint, x, y = self:GetPoint()
-    DidYouGrindDB.point = point
-    DidYouGrindDB.relativePoint = relativePoint
-    DidYouGrindDB.x = x
-    DidYouGrindDB.y = y
+    local layout = GetLayoutProfile()
+    layout.point = point
+    layout.relativePoint = relativePoint
+    layout.x = x
+    layout.y = y
 end)
 
 -- Resize handle
@@ -114,7 +238,7 @@ resizeButton:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Hi
 resizeButton:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
 
 resizeButton:SetScript("OnMouseDown", function()
-    if DidYouGrindDB and DidYouGrindDB.locked then
+    if GetCharacterProfile().locked then
         return
     end
     mainFrame:StartSizing("BOTTOMRIGHT")
@@ -122,8 +246,9 @@ end)
 
 resizeButton:SetScript("OnMouseUp", function()
     mainFrame:StopMovingOrSizing()
-    DidYouGrindDB.width = mainFrame:GetWidth()
-    DidYouGrindDB.height = mainFrame:GetHeight()
+    local layout = GetLayoutProfile()
+    layout.width = mainFrame:GetWidth()
+    layout.height = mainFrame:GetHeight()
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
@@ -157,7 +282,7 @@ minimizeButton.text:SetJustifyV("MIDDLE")
 
 local configButton = CreateFrame("Button", nil, mainFrame)
 configButton:SetSize(22, 22)
-configButton:SetPoint("TOPRIGHT", -32, -8)
+configButton:SetPoint("TOPRIGHT", -34, -8)
 
 configButton.icon = configButton:CreateTexture(nil, "ARTWORK")
 configButton.icon:SetSize(16, 16)
@@ -167,8 +292,13 @@ configButton.icon:SetVertexColor(0.85, 0.90, 0.95, 1)
 
 configButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 
+local altsButton = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+altsButton:SetSize(44, 18)
+altsButton:SetPoint("TOPRIGHT", -62, -10)
+altsButton:SetText("ALTS")
+
 local configPanel = CreateFrame("Frame", nil, mainFrame, "BackdropTemplate")
-configPanel:SetSize(210, 270)
+configPanel:SetSize(220, 285)
 configPanel:SetPoint("TOPRIGHT", -8, -34)
 configPanel:SetFrameStrata("DIALOG")
 configPanel:SetBackdrop({
@@ -190,8 +320,16 @@ configTitle:SetPoint("TOPLEFT", 10, -10)
 configTitle:SetText("|cffd7dde4Settings|r")
 
 local sectionTitle = configPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-sectionTitle:SetPoint("TOPLEFT", 10, -88)
+sectionTitle:SetPoint("TOPLEFT", 10, -122)
 sectionTitle:SetText("|cff9fb0c0Sections|r")
+
+local profileTitle = configPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+profileTitle:SetPoint("TOPLEFT", 10, -28)
+profileTitle:SetText("|cff9fb0c0Profiles|r")
+
+local profileHint = configPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+profileHint:SetPoint("TOPLEFT", 26, -48)
+profileHint:SetText("Use ALTS button for character board")
 
 local function CreateConfigCheckbox(parent, text, y)
     local check = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
@@ -206,18 +344,19 @@ local function CreateConfigCheckbox(parent, text, y)
     return check
 end
 
-local lockCheck = CreateConfigCheckbox(configPanel, "Lock frame", -28)
-local startMinimizedCheck = CreateConfigCheckbox(configPanel, "Start minimized", -48)
-local autoRefreshCheck = CreateConfigCheckbox(configPanel, "Auto refresh", -68)
-local compactModeCheck = CreateConfigCheckbox(configPanel, "Compact mode", -108)
+local accountWideLayoutCheck = CreateConfigCheckbox(configPanel, "Account-wide layout", -62)
+local lockCheck = CreateConfigCheckbox(configPanel, "Lock frame", -82)
+local startMinimizedCheck = CreateConfigCheckbox(configPanel, "Start minimized", -102)
+local autoRefreshCheck = CreateConfigCheckbox(configPanel, "Auto refresh", -122)
+local compactModeCheck = CreateConfigCheckbox(configPanel, "Compact mode", -142)
 
-local showKeysCheck = CreateConfigCheckbox(configPanel, "Show Keys", -128)
-local showDawncrestsCheck = CreateConfigCheckbox(configPanel, "Show Dawncrests", -148)
-local showWeeklyBossCheck = CreateConfigCheckbox(configPanel, "Show Weekly Boss", -168)
-local showGreatVaultCheck = CreateConfigCheckbox(configPanel, "Show Great Vault", -188)
-local showRaidsCheck = CreateConfigCheckbox(configPanel, "  - Raids", -208)
-local showDungeonsCheck = CreateConfigCheckbox(configPanel, "  - Dungeons", -228)
-local showWorldCheck = CreateConfigCheckbox(configPanel, "  - World / Delves", -248)
+local showKeysCheck = CreateConfigCheckbox(configPanel, "Show Keys", -162)
+local showDawncrestsCheck = CreateConfigCheckbox(configPanel, "Show Dawncrests", -182)
+local showWeeklyBossCheck = CreateConfigCheckbox(configPanel, "Show Weekly Boss", -202)
+local showGreatVaultCheck = CreateConfigCheckbox(configPanel, "Show Great Vault", -222)
+local showRaidsCheck = CreateConfigCheckbox(configPanel, "  - Raids", -242)
+local showDungeonsCheck = CreateConfigCheckbox(configPanel, "  - Dungeons", -262)
+local showWorldCheck = CreateConfigCheckbox(configPanel, "  - World / Delves", -282)
 
 -- =========================================
 -- SCROLL AREA
@@ -230,6 +369,264 @@ scrollFrame:SetPoint("BOTTOMRIGHT", -28, 10)
 local contentFrame = CreateFrame("Frame", nil, scrollFrame)
 contentFrame:SetSize(1, 1)
 scrollFrame:SetScrollChild(contentFrame)
+
+-- =========================================
+-- ALTS BOARD
+-- =========================================
+
+local altsBoardFrame = CreateFrame("Frame", "DidYouGrindAltsBoard", UIParent, "BackdropTemplate")
+altsBoardFrame:SetSize(760, 470)
+altsBoardFrame:SetPoint("CENTER")
+altsBoardFrame:SetFrameStrata("DIALOG")
+altsBoardFrame:SetMovable(true)
+altsBoardFrame:EnableMouse(true)
+altsBoardFrame:RegisterForDrag("LeftButton")
+altsBoardFrame:SetClampedToScreen(true)
+altsBoardFrame:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    edgeSize = 12,
+    insets = {
+        left = 2,
+        right = 2,
+        top = 2,
+        bottom = 2
+    }
+})
+altsBoardFrame:SetBackdropColor(0, 0, 0, 0.94)
+altsBoardFrame:Hide()
+
+altsBoardFrame:SetScript("OnDragStart", function(self)
+    self:StartMoving()
+end)
+
+altsBoardFrame:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+end)
+
+local altsTitle = altsBoardFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+altsTitle:SetPoint("TOPLEFT", 12, -10)
+altsTitle:SetText("|cff00ff99DidYouGrind Alts|r")
+
+local altsSub = altsBoardFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+altsSub:SetPoint("TOPLEFT", 12, -30)
+altsSub:SetText("|cffaaaaaaSnapshots per character|r")
+
+local altsClose = CreateFrame("Button", nil, altsBoardFrame, "UIPanelCloseButton")
+altsClose:SetPoint("TOPRIGHT", -4, -4)
+
+local altsListPanel = CreateFrame("Frame", nil, altsBoardFrame, "BackdropTemplate")
+altsListPanel:SetPoint("TOPLEFT", 12, -54)
+altsListPanel:SetPoint("BOTTOMLEFT", 12, 12)
+altsListPanel:SetWidth(250)
+altsListPanel:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    edgeSize = 10,
+    insets = {
+        left = 2,
+        right = 2,
+        top = 2,
+        bottom = 2
+    }
+})
+altsListPanel:SetBackdropColor(0, 0, 0, 0.5)
+
+local altsListTitle = altsListPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+altsListTitle:SetPoint("TOPLEFT", 10, -8)
+altsListTitle:SetText("|cffd7dde4Characters|r")
+
+local altsListScroll = CreateFrame("ScrollFrame", nil, altsListPanel, "UIPanelScrollFrameTemplate")
+altsListScroll:SetPoint("TOPLEFT", 8, -28)
+altsListScroll:SetPoint("BOTTOMRIGHT", -26, 8)
+
+local altsListContent = CreateFrame("Frame", nil, altsListScroll)
+altsListContent:SetSize(1, 1)
+altsListScroll:SetScrollChild(altsListContent)
+
+local altsDetailPanel = CreateFrame("Frame", nil, altsBoardFrame, "BackdropTemplate")
+altsDetailPanel:SetPoint("TOPLEFT", 274, -54)
+altsDetailPanel:SetPoint("BOTTOMRIGHT", -12, 12)
+altsDetailPanel:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    edgeSize = 10,
+    insets = {
+        left = 2,
+        right = 2,
+        top = 2,
+        bottom = 2
+    }
+})
+altsDetailPanel:SetBackdropColor(0, 0, 0, 0.5)
+
+local altsDetailTitle = altsDetailPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+altsDetailTitle:SetPoint("TOPLEFT", 12, -10)
+altsDetailTitle:SetText("Select an alt")
+
+local altsDetailMeta = altsDetailPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+altsDetailMeta:SetPoint("TOPLEFT", 12, -34)
+altsDetailMeta:SetText("|cffaaaaaaNo snapshot selected|r")
+
+local altsDetailBody = altsDetailPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+altsDetailBody:SetPoint("TOPLEFT", 12, -58)
+altsDetailBody:SetPoint("BOTTOMRIGHT", -12, 12)
+altsDetailBody:SetJustifyH("LEFT")
+altsDetailBody:SetJustifyV("TOP")
+altsDetailBody:SetText("")
+
+local altsSelectedKey = nil
+local altRowButtons = {}
+
+local function GetVisibleAltKeys()
+    local keys = {}
+    if not DidYouGrindDB or type(DidYouGrindDB.characterSnapshots) ~= "table" then
+        return keys
+    end
+
+    local hidden = DidYouGrindDB.hiddenAltKeys or {}
+    for key, _ in pairs(DidYouGrindDB.characterSnapshots) do
+        if key ~= currentCharacterKey and not hidden[key] then
+            table.insert(keys, key)
+        end
+    end
+
+    table.sort(keys)
+    return keys
+end
+
+local function SetAltsDetailFromSnapshot(key)
+    local snap = DidYouGrindDB and DidYouGrindDB.characterSnapshots and DidYouGrindDB.characterSnapshots[key]
+    if not snap then
+        altsDetailTitle:SetText("No snapshot")
+        altsDetailMeta:SetText("|cffaaaaaaNo data for this character yet.|r")
+        altsDetailBody:SetText("")
+        return
+    end
+
+    local rows = snap.rows or {}
+    local realm, name = string.match(key, "^(.+)%-(.+)$")
+    altsDetailTitle:SetText(name or GetCharacterDisplayNameFromKey(key))
+    local stamp = snap.updatedAt or "unknown time"
+    altsDetailMeta:SetText(string.format("|cffaaaaaa%s | Last synced: %s|r", realm or "UnknownRealm", stamp))
+
+    local text = table.concat({
+        "|cffd7dde4Keys|r",
+        string.format("Restored Key: %s", rows.keys_restored or "|cff666666--|r"),
+        string.format("Key Shards: %s", rows.keys_shards or "|cff666666--|r"),
+        " ",
+        "|cffd7dde4Dawncrests|r",
+        string.format("Adventurer: %s", rows.dawn_adventurer or "|cff666666--|r"),
+        string.format("Veteran: %s", rows.dawn_veteran or "|cff666666--|r"),
+        string.format("Champion: %s", rows.dawn_champion or "|cff666666--|r"),
+        string.format("Hero: %s", rows.dawn_hero or "|cff666666--|r"),
+        " ",
+        "|cffd7dde4Weekly Boss|r",
+        string.format("This reset: %s", rows.weekly_status or "|cff666666--|r"),
+        " ",
+        "|cffd7dde4Great Vault|r",
+        string.format("Raids: %s | %s | %s", rows.raid_slot1 or "--", rows.raid_slot2 or "--", rows.raid_slot3 or "--"),
+        string.format("Dungeons: %s | %s | %s", rows.dungeon_slot1 or "--", rows.dungeon_slot2 or "--", rows.dungeon_slot3 or "--"),
+        string.format("World/Delves: %s | %s | %s", rows.world_slot1 or "--", rows.world_slot2 or "--", rows.world_slot3 or "--"),
+    }, "\n")
+
+    altsDetailBody:SetText(text)
+end
+
+local function RefreshAltsBoard()
+    if not DidYouGrindDB then
+        return
+    end
+
+    local keys = GetVisibleAltKeys()
+    altsSub:SetText(string.format("|cffaaaaaa%d alts tracked|r", #keys))
+    local rowHeight = 44
+    local width = math.max(altsListPanel:GetWidth() - 36, 180)
+    local y = 0
+
+    for i, key in ipairs(keys) do
+        local row = altRowButtons[i]
+        if not row then
+            row = CreateFrame("Button", nil, altsListContent, "BackdropTemplate")
+            row:SetBackdrop({
+                bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                edgeSize = 8,
+                insets = {
+                    left = 1,
+                    right = 1,
+                    top = 1,
+                    bottom = 1
+                }
+            })
+            row:SetBackdropColor(0, 0, 0, 0.3)
+
+            row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            row.name:SetPoint("TOPLEFT", 8, -6)
+            row.name:SetJustifyH("LEFT")
+
+            row.meta = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            row.meta:SetPoint("TOPLEFT", 8, -22)
+            row.meta:SetJustifyH("LEFT")
+
+            row.remove = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            row.remove:SetSize(18, 18)
+            row.remove:SetPoint("TOPRIGHT", -4, -4)
+            row.remove:SetText("x")
+
+            row:SetScript("OnClick", function(self)
+                altsSelectedKey = self.key
+                SetAltsDetailFromSnapshot(self.key)
+                RefreshAltsBoard()
+            end)
+
+            row.remove:SetScript("OnClick", function(self)
+                local k = self:GetParent().key
+                if type(DidYouGrindDB.hiddenAltKeys) ~= "table" then
+                    DidYouGrindDB.hiddenAltKeys = {}
+                end
+                DidYouGrindDB.hiddenAltKeys[k] = true
+                if altsSelectedKey == k then
+                    altsSelectedKey = nil
+                end
+                RefreshAltsBoard()
+            end)
+
+            altRowButtons[i] = row
+        end
+
+        local snap = DidYouGrindDB.characterSnapshots[key]
+        row.key = key
+        row:Show()
+        row:SetSize(width, rowHeight - 2)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, y)
+        row:SetBackdropBorderColor(altsSelectedKey == key and 0.25 or 0.12, altsSelectedKey == key and 0.8 or 0.12, 0.95, 1)
+
+        row.name:SetText("|cffd7dde4" .. GetCharacterDisplayNameFromKey(key) .. "|r")
+        row.meta:SetText("|cff9fb0c0" .. (snap and snap.updatedAt or "No snapshot date") .. "|r")
+        y = y - rowHeight
+    end
+
+    for i = #keys + 1, #altRowButtons do
+        altRowButtons[i]:Hide()
+    end
+
+    if #keys == 0 then
+        altsSelectedKey = nil
+        altsDetailTitle:SetText("No alts yet")
+        altsDetailMeta:SetText("|cffaaaaaaLog into another character to generate a snapshot.|r")
+        altsDetailBody:SetText("")
+    elseif not altsSelectedKey or not DidYouGrindDB.characterSnapshots[altsSelectedKey] or DidYouGrindDB.hiddenAltKeys[altsSelectedKey] then
+        altsSelectedKey = keys[1]
+        SetAltsDetailFromSnapshot(altsSelectedKey)
+    else
+        SetAltsDetailFromSnapshot(altsSelectedKey)
+    end
+
+    local usedHeight = math.max(math.abs(y), 1)
+    altsListContent:SetSize(width, usedHeight)
+end
 
 -- =========================================
 -- UI HELPERS
@@ -257,7 +654,7 @@ local function CreateRow(parent)
     return row
 end
 
-local function CreateSectionHeader(parent, key, text, indent)
+local function CreateSectionHeader(parent, key, text, indent, categoryIconPath)
     local button = CreateFrame("Button", nil, parent)
     button:SetHeight(18)
 
@@ -265,13 +662,18 @@ local function CreateSectionHeader(parent, key, text, indent)
     button.key = key
     button.labelText = text
     button.summaryText = ""
+    button.categoryIconPath = categoryIconPath
 
     button.icon = button:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     button.icon:SetPoint("LEFT", button.indent, 0)
     button.icon:SetJustifyH("LEFT")
 
+    button.categoryIcon = button:CreateTexture(nil, "ARTWORK")
+    button.categoryIcon:SetSize(12, 12)
+    button.categoryIcon:SetPoint("LEFT", button.indent + 14, 0)
+
     button.label = button:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    button.label:SetPoint("LEFT", button.indent + 18, 0)
+    button.label:SetPoint("LEFT", button.indent + 30, 0)
     button.label:SetJustifyH("LEFT")
 
     button.summary = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -279,7 +681,8 @@ local function CreateSectionHeader(parent, key, text, indent)
     button.summary:SetJustifyH("RIGHT")
 
     button:SetScript("OnClick", function(self)
-        DidYouGrindDB.collapsed[self.key] = not DidYouGrindDB.collapsed[self.key]
+        local collapsed = GetCollapsedSections()
+        collapsed[self.key] = not collapsed[self.key]
         if _G.DidYouGrind_Layout then
             _G.DidYouGrind_Layout()
         end
@@ -296,7 +699,7 @@ local sections = {}
 
 sections.keys = {
     key = "keys",
-    header = CreateSectionHeader(contentFrame, "keys", "Keys", 0),
+    header = CreateSectionHeader(contentFrame, "keys", "Keys", 0, "Interface\\Icons\\INV_Misc_Key_14"),
     divider = CreateDivider(contentFrame),
     rows = {
         restored = CreateRow(contentFrame),
@@ -307,7 +710,7 @@ sections.keys = {
 
 sections.dawncrests = {
     key = "dawncrests",
-    header = CreateSectionHeader(contentFrame, "dawncrests", "Dawncrests", 0),
+    header = CreateSectionHeader(contentFrame, "dawncrests", "Dawncrests", 0, "Interface\\Icons\\INV_Misc_Coin_01"),
     divider = CreateDivider(contentFrame),
     rows = {
         adventurer = CreateRow(contentFrame),
@@ -320,7 +723,7 @@ sections.dawncrests = {
 
 sections.weeklyboss = {
     key = "weeklyboss",
-    header = CreateSectionHeader(contentFrame, "weeklyboss", "Weekly Boss", 0),
+    header = CreateSectionHeader(contentFrame, "weeklyboss", "Weekly Boss", 0, "Interface\\Icons\\Achievement_Boss_Anubarak"),
     divider = CreateDivider(contentFrame),
     rows = {
         status = CreateRow(contentFrame),
@@ -330,7 +733,7 @@ sections.weeklyboss = {
 
 sections.greatvault = {
     key = "greatvault",
-    header = CreateSectionHeader(contentFrame, "greatvault", "Great Vault", 0),
+    header = CreateSectionHeader(contentFrame, "greatvault", "Great Vault", 0, "Interface\\Icons\\INV_Chest_Cloth_17"),
     divider = CreateDivider(contentFrame),
     children = {}
 }
@@ -338,7 +741,7 @@ sections.greatvault = {
 sections.raids = {
     key = "raids",
     visibilityKey = "raids",
-    header = CreateSectionHeader(contentFrame, "raids", "Raids", 12),
+    header = CreateSectionHeader(contentFrame, "raids", "Raids", 12, "Interface\\Icons\\Ability_Racial_BloodRage"),
     rows = {
         slot1 = CreateRow(contentFrame),
         slot2 = CreateRow(contentFrame),
@@ -350,7 +753,7 @@ sections.raids = {
 sections.dungeons = {
     key = "dungeons",
     visibilityKey = "dungeons",
-    header = CreateSectionHeader(contentFrame, "dungeons", "Dungeons", 12),
+    header = CreateSectionHeader(contentFrame, "dungeons", "Dungeons", 12, "Interface\\Icons\\INV_Misc_Map02"),
     rows = {
         slot1 = CreateRow(contentFrame),
         slot2 = CreateRow(contentFrame),
@@ -362,7 +765,7 @@ sections.dungeons = {
 sections.world = {
     key = "world",
     visibilityKey = "world",
-    header = CreateSectionHeader(contentFrame, "world", "World / Delves", 12),
+    header = CreateSectionHeader(contentFrame, "world", "World / Delves", 12, "Interface\\Icons\\Achievement_Zone_DragonIsles_01"),
     rows = {
         slot1 = CreateRow(contentFrame),
         slot2 = CreateRow(contentFrame),
@@ -689,7 +1092,57 @@ end
 -- DATA UPDATE
 -- =========================================
 
-local function UpdateData()
+local function SaveCurrentSnapshot()
+    if not DidYouGrindDB then
+        return
+    end
+
+    if type(DidYouGrindDB.characterSnapshots) ~= "table" then
+        DidYouGrindDB.characterSnapshots = {}
+    end
+    if type(DidYouGrindDB.hiddenAltKeys) ~= "table" then
+        DidYouGrindDB.hiddenAltKeys = {}
+    end
+
+    local key = currentCharacterKey or GetCharacterKey()
+    local snapshot = {
+        key = key,
+        displayName = GetCharacterDisplayNameFromKey(key),
+        updatedAt = date("%Y-%m-%d %H:%M:%S"),
+        rows = {
+            keys_restored = sections.keys.rows.restored.value:GetText(),
+            keys_shards = sections.keys.rows.shards.value:GetText(),
+            dawn_adventurer = sections.dawncrests.rows.adventurer.value:GetText(),
+            dawn_veteran = sections.dawncrests.rows.veteran.value:GetText(),
+            dawn_champion = sections.dawncrests.rows.champion.value:GetText(),
+            dawn_hero = sections.dawncrests.rows.hero.value:GetText(),
+            weekly_status = sections.weeklyboss.rows.status.value:GetText(),
+            raid_slot1 = sections.raids.rows.slot1.value:GetText(),
+            raid_slot2 = sections.raids.rows.slot2.value:GetText(),
+            raid_slot3 = sections.raids.rows.slot3.value:GetText(),
+            dungeon_slot1 = sections.dungeons.rows.slot1.value:GetText(),
+            dungeon_slot2 = sections.dungeons.rows.slot2.value:GetText(),
+            dungeon_slot3 = sections.dungeons.rows.slot3.value:GetText(),
+            world_slot1 = sections.world.rows.slot1.value:GetText(),
+            world_slot2 = sections.world.rows.slot2.value:GetText(),
+            world_slot3 = sections.world.rows.slot3.value:GetText(),
+        },
+        summaries = {
+            weeklyboss = sections.weeklyboss.header.summaryText,
+            greatvault = sections.greatvault.header.summaryText,
+            raids = sections.raids.header.summaryText,
+            dungeons = sections.dungeons.header.summaryText,
+            world = sections.world.header.summaryText,
+        },
+    }
+
+    DidYouGrindDB.characterSnapshots[key] = snapshot
+    DidYouGrindDB.hiddenAltKeys[key] = nil
+end
+
+UpdateData = function()
+    subtitle:SetText("|cffaaaaaa(Probably not)|r")
+
     -- Keys
     SetRow(sections.keys.rows.restored, "Restored Key", FormatNumber(GetCurrencyByName("restored coffer key")), "|cffffd100")
     SetRow(sections.keys.rows.shards, "Key Shards", FormatNumber(GetCurrencyByName("coffer key shard")), "|cffffd100")
@@ -739,6 +1192,7 @@ local function UpdateData()
     SetRow(sections.world.rows.slot3, "Slot 3", BuildVaultText(latestVaultData.worldSlots[3]), "|cffc8c8c8")
 
     UpdateSectionSummaries()
+    SaveCurrentSnapshot()
 end
 
 -- =========================================
@@ -767,8 +1221,36 @@ local function HideSectionRows(section)
     end
 end
 
+local function HideSectionContent(section)
+    if section.rows and section.rowOrder then
+        for _, rowKey in ipairs(section.rowOrder) do
+            local row = section.rows[rowKey]
+            if row then
+                row:Hide()
+            end
+        end
+    end
+
+    if section.children then
+        for _, child in ipairs(section.children) do
+            child.header:Hide()
+            HideSectionRows(child)
+        end
+    end
+end
+
 local function SetHeaderVisual(header, collapsed)
     header.icon:SetText(collapsed and "|cffb8c2cc+|r" or "|cffb8c2cc-|r")
+    if header.categoryIconPath and header.categoryIconPath ~= "" then
+        header.categoryIcon:Show()
+        header.categoryIcon:SetTexture(header.categoryIconPath)
+        header.label:ClearAllPoints()
+        header.label:SetPoint("LEFT", header.indent + 30, 0)
+    else
+        header.categoryIcon:Hide()
+        header.label:ClearAllPoints()
+        header.label:SetPoint("LEFT", header.indent + 18, 0)
+    end
     header.label:SetText("|cffd7dde4" .. header.labelText .. "|r")
     header.summary:SetText(header.summaryText or "")
 end
@@ -778,19 +1260,15 @@ local function IsSectionVisible(section)
         return true
     end
 
-    if not DidYouGrindDB or not DidYouGrindDB.showSections then
-        return true
-    end
-
-    return DidYouGrindDB.showSections[section.visibilityKey] ~= false
+    local showSections = GetShowSections()
+    return showSections[section.visibilityKey] ~= false
 end
 
 local function GetLayoutMetrics()
-    if DidYouGrindDB and DidYouGrindDB.compactMode then
+    if GetCharacterProfile().compactMode then
         return {
             headerHeight = 16,
             headerGap = 18,
-            dividerGap = 6,
             rowHeight = 15,
             sectionGap = 5,
             childGap = 2,
@@ -800,7 +1278,6 @@ local function GetLayoutMetrics()
     return {
         headerHeight = 18,
         headerGap = 20,
-        dividerGap = 10,
         rowHeight = 18,
         sectionGap = 8,
         childGap = 4,
@@ -808,26 +1285,27 @@ local function GetLayoutMetrics()
 end
 
 local function LayoutSection(section, y, width, metrics)
+    local collapsed = GetCollapsedSections()
+
+    if section.divider then
+        section.divider:Show()
+        section.divider:ClearAllPoints()
+        section.divider:SetPoint("TOPLEFT", 0, y + 6)
+        section.divider:SetPoint("TOPRIGHT", 0, y + 6)
+    end
+
     section.header:Show()
     section.header:ClearAllPoints()
     section.header:SetPoint("TOPLEFT", 0, y)
     section.header:SetSize(width, metrics.headerHeight)
 
-    SetHeaderVisual(section.header, DidYouGrindDB.collapsed[section.key])
+    SetHeaderVisual(section.header, collapsed[section.key])
 
     y = y - metrics.headerGap
 
-    if DidYouGrindDB.collapsed[section.key] then
-        HideSectionRows(section)
+    if collapsed[section.key] then
+        HideSectionContent(section)
         return y
-    end
-
-    if section.divider then
-        section.divider:Show()
-        section.divider:ClearAllPoints()
-        section.divider:SetPoint("TOPLEFT", 0, y)
-        section.divider:SetPoint("TOPRIGHT", 0, y)
-        y = y - metrics.dividerGap
     end
 
     if section.rows and section.rowOrder then
@@ -858,15 +1336,18 @@ local function LayoutSection(section, y, width, metrics)
     return y
 end
 
-local function LayoutUI()
+LayoutUI = function()
     local metrics = GetLayoutMetrics()
-    minimizeButton.text:SetText(DidYouGrindDB.minimized and "|cffb8c2cc+|r" or "|cffb8c2cc-|r")
+    local profile = GetCharacterProfile()
+    local layout = GetLayoutProfile()
+    local showSections = GetShowSections()
+    minimizeButton.text:SetText(profile.minimized and "|cffb8c2cc+|r" or "|cffb8c2cc-|r")
 
-    local frameWidth = DidYouGrindDB.width or 420
-    local frameHeight = DidYouGrindDB.height or 320
+    local frameWidth = layout.width or 420
+    local frameHeight = layout.height or 320
     local contentWidth = math.max(frameWidth - 42, 260)
 
-    if DidYouGrindDB.minimized then
+    if profile.minimized then
         scrollFrame:Hide()
         resizeButton:Hide()
         configPanel:Hide()
@@ -876,7 +1357,7 @@ local function LayoutUI()
     end
 
     scrollFrame:Show()
-    if DidYouGrindDB.locked then
+    if profile.locked then
         resizeButton:Hide()
     else
         resizeButton:Show()
@@ -886,7 +1367,7 @@ local function LayoutUI()
     mainFrame:SetHeight(frameHeight)
 
     local y = 0
-    if DidYouGrindDB.showSections.keys then
+    if showSections.keys then
         y = LayoutSection(sections.keys, y, contentWidth, metrics)
         y = y - metrics.sectionGap
     else
@@ -894,7 +1375,7 @@ local function LayoutUI()
         HideSectionRows(sections.keys)
     end
 
-    if DidYouGrindDB.showSections.dawncrests then
+    if showSections.dawncrests then
         y = LayoutSection(sections.dawncrests, y, contentWidth, metrics)
         y = y - metrics.sectionGap
     else
@@ -902,7 +1383,7 @@ local function LayoutUI()
         HideSectionRows(sections.dawncrests)
     end
 
-    if DidYouGrindDB.showSections.weeklyboss then
+    if showSections.weeklyboss then
         y = LayoutSection(sections.weeklyboss, y, contentWidth, metrics)
         y = y - metrics.sectionGap
     else
@@ -910,7 +1391,7 @@ local function LayoutUI()
         HideSectionRows(sections.weeklyboss)
     end
 
-    if DidYouGrindDB.showSections.greatvault then
+    if showSections.greatvault then
         y = LayoutSection(sections.greatvault, y, contentWidth, metrics)
         y = y - metrics.sectionGap
     else
@@ -932,20 +1413,24 @@ _G.DidYouGrind_Layout = LayoutUI
 -- BUTTONS
 -- =========================================
 
-local function SyncConfigPanelChecks()
-    lockCheck:SetChecked(DidYouGrindDB.locked)
-    startMinimizedCheck:SetChecked(DidYouGrindDB.startMinimized)
-    autoRefreshCheck:SetChecked(DidYouGrindDB.autoRefresh)
-    compactModeCheck:SetChecked(DidYouGrindDB.compactMode)
-    showKeysCheck:SetChecked(DidYouGrindDB.showSections.keys)
-    showDawncrestsCheck:SetChecked(DidYouGrindDB.showSections.dawncrests)
-    showWeeklyBossCheck:SetChecked(DidYouGrindDB.showSections.weeklyboss)
-    showGreatVaultCheck:SetChecked(DidYouGrindDB.showSections.greatvault)
-    showRaidsCheck:SetChecked(DidYouGrindDB.showSections.raids)
-    showDungeonsCheck:SetChecked(DidYouGrindDB.showSections.dungeons)
-    showWorldCheck:SetChecked(DidYouGrindDB.showSections.world)
+SyncConfigPanelChecks = function()
+    local profile = GetCharacterProfile()
+    local showSections = GetShowSections()
 
-    local parentVisible = DidYouGrindDB.showSections.greatvault
+    accountWideLayoutCheck:SetChecked(DidYouGrindDB and DidYouGrindDB.accountWideLayout)
+    lockCheck:SetChecked(profile.locked)
+    startMinimizedCheck:SetChecked(profile.startMinimized)
+    autoRefreshCheck:SetChecked(profile.autoRefresh)
+    compactModeCheck:SetChecked(profile.compactMode)
+    showKeysCheck:SetChecked(showSections.keys)
+    showDawncrestsCheck:SetChecked(showSections.dawncrests)
+    showWeeklyBossCheck:SetChecked(showSections.weeklyboss)
+    showGreatVaultCheck:SetChecked(showSections.greatvault)
+    showRaidsCheck:SetChecked(showSections.raids)
+    showDungeonsCheck:SetChecked(showSections.dungeons)
+    showWorldCheck:SetChecked(showSections.world)
+
+    local parentVisible = showSections.greatvault
     if parentVisible then
         showRaidsCheck:Enable()
         showDungeonsCheck:Enable()
@@ -964,7 +1449,8 @@ local function SyncConfigPanelChecks()
 end
 
 minimizeButton:SetScript("OnClick", function()
-    DidYouGrindDB.minimized = not DidYouGrindDB.minimized
+    local profile = GetCharacterProfile()
+    profile.minimized = not profile.minimized
     LayoutUI()
 end)
 
@@ -988,51 +1474,72 @@ configButton:SetScript("OnLeave", function()
     GameTooltip:Hide()
 end)
 
+altsButton:SetScript("OnClick", function()
+    if altsBoardFrame:IsShown() then
+        altsBoardFrame:Hide()
+    else
+        configPanel:Hide()
+        RefreshAltsBoard()
+        altsBoardFrame:Show()
+    end
+end)
+
+altsButton:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Alt Board", 1, 1, 1)
+    GameTooltip:AddLine("Browse snapshots from your other characters.", 0.75, 0.82, 0.9, true)
+    GameTooltip:Show()
+end)
+
+altsButton:SetScript("OnLeave", function()
+    GameTooltip:Hide()
+end)
+
 lockCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.locked = self:GetChecked() and true or false
+    GetCharacterProfile().locked = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 startMinimizedCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.startMinimized = self:GetChecked() and true or false
+    GetCharacterProfile().startMinimized = self:GetChecked() and true or false
 end)
 
 autoRefreshCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.autoRefresh = self:GetChecked() and true or false
+    GetCharacterProfile().autoRefresh = self:GetChecked() and true or false
 end)
 
 compactModeCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.compactMode = self:GetChecked() and true or false
+    GetCharacterProfile().compactMode = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 showKeysCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.keys = self:GetChecked() and true or false
+    GetShowSections().keys = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 showDawncrestsCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.dawncrests = self:GetChecked() and true or false
+    GetShowSections().dawncrests = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 showWeeklyBossCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.weeklyboss = self:GetChecked() and true or false
+    GetShowSections().weeklyboss = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 showGreatVaultCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.greatvault = self:GetChecked() and true or false
+    GetShowSections().greatvault = self:GetChecked() and true or false
     SyncConfigPanelChecks()
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
@@ -1040,21 +1547,43 @@ showGreatVaultCheck:SetScript("OnClick", function(self)
 end)
 
 showRaidsCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.raids = self:GetChecked() and true or false
+    GetShowSections().raids = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 showDungeonsCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.dungeons = self:GetChecked() and true or false
+    GetShowSections().dungeons = self:GetChecked() and true or false
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
 end)
 
 showWorldCheck:SetScript("OnClick", function(self)
-    DidYouGrindDB.showSections.world = self:GetChecked() and true or false
+    GetShowSections().world = self:GetChecked() and true or false
+    if _G.DidYouGrind_Layout then
+        _G.DidYouGrind_Layout()
+    end
+end)
+
+accountWideLayoutCheck:SetScript("OnClick", function(self)
+    DidYouGrindDB.accountWideLayout = self:GetChecked() and true or false
+    RefreshActiveProfiles()
+    local layout = GetLayoutProfile()
+    mainFrame:ClearAllPoints()
+    mainFrame:SetPoint(
+        layout.point or "CENTER",
+        UIParent,
+        layout.relativePoint or "CENTER",
+        layout.x or 0,
+        layout.y or 0
+    )
+    mainFrame:SetSize(
+        layout.width or 420,
+        layout.height or 320
+    )
+    SyncConfigPanelChecks()
     if _G.DidYouGrind_Layout then
         _G.DidYouGrind_Layout()
     end
@@ -1062,6 +1591,7 @@ end)
 
 mainFrame:SetScript("OnHide", function()
     configPanel:Hide()
+    altsBoardFrame:Hide()
 end)
 
 -- =========================================
@@ -1069,18 +1599,19 @@ end)
 -- =========================================
 
 local function ApplyPosition()
+    local layout = GetLayoutProfile()
     mainFrame:ClearAllPoints()
     mainFrame:SetPoint(
-        DidYouGrindDB.point or "CENTER",
+        layout.point or "CENTER",
         UIParent,
-        DidYouGrindDB.relativePoint or "CENTER",
-        DidYouGrindDB.x or 0,
-        DidYouGrindDB.y or 0
+        layout.relativePoint or "CENTER",
+        layout.x or 0,
+        layout.y or 0
     )
 
     mainFrame:SetSize(
-        DidYouGrindDB.width or 420,
-        DidYouGrindDB.height or 320
+        layout.width or 420,
+        layout.height or 320
     )
 end
 
@@ -1093,20 +1624,21 @@ SlashCmdList["DIDYOUGRIND"] = function(msg)
     msg = string.lower((msg or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 
     if msg == "reset" then
-        DidYouGrindDB.point = "CENTER"
-        DidYouGrindDB.relativePoint = "CENTER"
-        DidYouGrindDB.x = 0
-        DidYouGrindDB.y = 0
-        DidYouGrindDB.width = defaults.width
-        DidYouGrindDB.height = defaults.height
+        local layout = GetLayoutProfile()
+        layout.point = "CENTER"
+        layout.relativePoint = "CENTER"
+        layout.x = 0
+        layout.y = 0
+        layout.width = layoutDefaults.width
+        layout.height = layoutDefaults.height
         ApplyPosition()
         LayoutUI()
         print("DidYouGrind: position and size reset.")
     elseif msg == "min" then
-        DidYouGrindDB.minimized = true
+        GetCharacterProfile().minimized = true
         LayoutUI()
     elseif msg == "max" then
-        DidYouGrindDB.minimized = false
+        GetCharacterProfile().minimized = false
         LayoutUI()
     elseif msg == "toggle" then
         if mainFrame:IsShown() then
@@ -1121,8 +1653,9 @@ SlashCmdList["DIDYOUGRIND"] = function(msg)
         LayoutUI()
         print("DidYouGrind: refreshed.")
     elseif msg == "wbdebug" then
-        DidYouGrindDB.weeklyBossDebug = not DidYouGrindDB.weeklyBossDebug
-        if DidYouGrindDB.weeklyBossDebug then
+        local profile = GetCharacterProfile()
+        profile.weeklyBossDebug = not profile.weeklyBossDebug
+        if profile.weeklyBossDebug then
             print("DidYouGrind: weekly boss debug enabled. Kill/turn in and watch chat for quest IDs.")
         else
             print("DidYouGrind: weekly boss debug disabled.")
@@ -1134,6 +1667,20 @@ SlashCmdList["DIDYOUGRIND"] = function(msg)
         else
             table.sort(ids)
             print("DidYouGrind: known weekly boss quest IDs: " .. table.concat(ids, ", "))
+        end
+    elseif msg == "layoutscope" then
+        if DidYouGrindDB.accountWideLayout then
+            print("DidYouGrind: layout scope is account-wide.")
+        else
+            print("DidYouGrind: layout scope is character-specific.")
+        end
+    elseif msg == "alts" then
+        if altsBoardFrame:IsShown() then
+            altsBoardFrame:Hide()
+        else
+            configPanel:Hide()
+            RefreshAltsBoard()
+            altsBoardFrame:Show()
         end
     elseif msg == "config" or msg == "options" then
         if configPanel:IsShown() then
@@ -1151,6 +1698,8 @@ SlashCmdList["DIDYOUGRIND"] = function(msg)
         print("/dyg refresh")
         print("/dyg wbdebug")
         print("/dyg wbids")
+        print("/dyg layoutscope")
+        print("/dyg alts")
         print("/dyg config")
     end
 end
@@ -1163,9 +1712,27 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         local loadedAddon = ...
         if loadedAddon == addonName then
-            DidYouGrindDB = CopyDefaults(defaults, DidYouGrindDB or {})
-            if DidYouGrindDB.startMinimized then
-                DidYouGrindDB.minimized = true
+            DidYouGrindDB = DidYouGrindDB or {}
+            local currentCharKey = GetCharacterKey()
+            DidYouGrindDB.characterProfiles = DidYouGrindDB.characterProfiles or {}
+
+            if DidYouGrindDB.point ~= nil then
+                DidYouGrindDB.globalLayout = CopyDefaults({
+                    point = DidYouGrindDB.point,
+                    relativePoint = DidYouGrindDB.relativePoint,
+                    x = DidYouGrindDB.x,
+                    y = DidYouGrindDB.y,
+                    width = DidYouGrindDB.width,
+                    height = DidYouGrindDB.height,
+                }, DidYouGrindDB.globalLayout or {})
+            end
+
+            local migratedProfile = CopyDefaults(characterDefaults, DidYouGrindDB.characterProfiles[currentCharKey] or {})
+            MigrateLegacyIntoCharacterProfile(migratedProfile, DidYouGrindDB)
+            DidYouGrindDB.characterProfiles[currentCharKey] = migratedProfile
+            RefreshActiveProfiles()
+            if GetCharacterProfile().startMinimized then
+                GetCharacterProfile().minimized = true
             end
             ApplyPosition()
             UpdateData()
@@ -1173,6 +1740,10 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             mainFrame:Show()
         end
     elseif event == "QUEST_TURNED_IN" then
+        if not IsProfileReady() then
+            return
+        end
+
         local questID = ...
         local title = nil
         if C_QuestLog and C_QuestLog.GetTitleForQuestID then
@@ -1183,7 +1754,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             LearnWeeklyBossQuestID(questID, title)
         end
 
-        if DidYouGrindDB and DidYouGrindDB.weeklyBossDebug then
+        if GetCharacterProfile().weeklyBossDebug then
             if title and title ~= "" then
                 print("DidYouGrind WB Debug: QUEST_TURNED_IN questID=" .. tostring(questID) .. " title=\"" .. title .. "\"")
             else
@@ -1191,7 +1762,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             end
         end
     else
-        if mainFrame:IsShown() and DidYouGrindDB and DidYouGrindDB.autoRefresh then
+        if IsProfileReady() and mainFrame:IsShown() and GetCharacterProfile().autoRefresh then
             UpdateData()
             LayoutUI()
         end
@@ -1210,7 +1781,7 @@ eventFrame:RegisterEvent("QUEST_TURNED_IN")
 
 local elapsed = 0
 mainFrame:SetScript("OnUpdate", function(_, delta)
-    if not mainFrame:IsShown() or not DidYouGrindDB or not DidYouGrindDB.autoRefresh then
+    if not IsProfileReady() or not mainFrame:IsShown() or not GetCharacterProfile().autoRefresh then
         return
     end
 
